@@ -2,7 +2,7 @@
 use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
+    AsyncWindowContext, AtlasKey, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
     Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
@@ -4602,19 +4602,41 @@ impl Window {
             image_id: data.id,
             frame_index,
         };
+        let key: AtlasKey = params.into();
 
-        let tile = self
-            .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
-                Ok(Some((
-                    data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
-                )))
-            })?
-            .expect("Callback above only returns Some");
+        // Zero-copy path: a GPU-resident image is sampled by the platform
+        // renderer directly, so we skip the CPU atlas upload entirely. If the
+        // platform atlas doesn't support external textures (returns `None`),
+        // fall back to the CPU byte-backed path below.
+        let tile = if let Some(gpu) = data.gpu_image() {
+            match self.sprite_atlas.get_or_insert_gpu_image(&key, gpu.as_any())? {
+                Some(tile) => tile,
+                None => self
+                    .sprite_atlas
+                    .get_or_insert_with(&key, &mut || {
+                        Ok(Some((
+                            data.size(frame_index),
+                            Cow::Borrowed(
+                                data.as_bytes(frame_index)
+                                    .expect("It's the caller's job to pass a valid frame index"),
+                            ),
+                        )))
+                    })?
+                    .expect("Callback above only returns Some"),
+            }
+        } else {
+            self.sprite_atlas
+                .get_or_insert_with(&key, &mut || {
+                    Ok(Some((
+                        data.size(frame_index),
+                        Cow::Borrowed(
+                            data.as_bytes(frame_index)
+                                .expect("It's the caller's job to pass a valid frame index"),
+                        ),
+                    )))
+                })?
+                .expect("Callback above only returns Some")
+        };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
 

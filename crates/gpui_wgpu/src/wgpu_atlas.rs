@@ -3,7 +3,7 @@ use collections::FxHashMap;
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
-    PlatformAtlas, Point, Size,
+    PlatformAtlas, Point, Size, TileId,
 };
 use parking_lot::Mutex;
 use std::{borrow::Cow, ops, sync::Arc};
@@ -37,6 +37,11 @@ struct WgpuAtlasState {
     storage: WgpuAtlasStorage,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     pending_uploads: Vec<PendingUpload>,
+    /// Externally-owned GPU textures drawn directly (zero-copy), keyed by the
+    /// [`AtlasTextureId`] returned to the caller. Never copied into an atlas
+    /// sheet; the renderer samples them in place.
+    external_textures: FxHashMap<AtlasTextureId, Arc<wgpu::TextureView>>,
+    next_external_index: u32,
 }
 
 pub struct WgpuTextureInfo {
@@ -58,6 +63,8 @@ impl WgpuAtlas {
             storage: WgpuAtlasStorage::default(),
             tiles_by_key: Default::default(),
             pending_uploads: Vec::new(),
+            external_textures: Default::default(),
+            next_external_index: 0,
         }))
     }
 
@@ -76,10 +83,18 @@ impl WgpuAtlas {
 
     pub fn get_texture_info(&self, id: AtlasTextureId) -> WgpuTextureInfo {
         let lock = self.0.lock();
-        let texture = &lock.storage[id];
-        WgpuTextureInfo {
-            view: texture.view.clone(),
-        }
+        let view = if id.kind == AtlasTextureKind::External {
+            // The `external_textures` map holds the `Arc` alive; clone out an
+            // owned view handle for binding (they share the same texture).
+            lock.external_textures
+                .get(&id)
+                .expect("external texture must exist before it is drawn")
+                .as_ref()
+                .clone()
+        } else {
+            lock.storage[id].view.clone()
+        };
+        WgpuTextureInfo { view }
     }
 
     /// Clears all cached textures and tiles, forcing them to be recreated.
@@ -89,6 +104,8 @@ impl WgpuAtlas {
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
         lock.pending_uploads.clear();
+        lock.external_textures.clear();
+        lock.next_external_index = 0;
     }
 
     /// Handles device lost by clearing all textures and cached tiles.
@@ -101,6 +118,8 @@ impl WgpuAtlas {
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
         lock.pending_uploads.clear();
+        lock.external_textures.clear();
+        lock.next_external_index = 0;
     }
 }
 
@@ -127,6 +146,49 @@ impl PlatformAtlas for WgpuAtlas {
         }
     }
 
+    fn get_or_insert_gpu_image(
+        &self,
+        key: &AtlasKey,
+        image: &dyn std::any::Any,
+    ) -> Result<Option<AtlasTile>> {
+        let mut lock = self.0.lock();
+        if let Some(tile) = lock.tiles_by_key.get(key) {
+            return Ok(Some(*tile));
+        }
+
+        // The zero-copy image hands us an `Arc<wgpu::TextureView>` (see
+        // gpui::GpuImage::as_any). We keep a reference so the texture stays
+        // alive while it's drawn, and hand the caller an External tile whose
+        // `AtlasTextureId` routes `get_texture_info` back to this view.
+        let view = image
+            .downcast_ref::<Arc<wgpu::TextureView>>()
+            .context("external GPU image must carry an Arc<wgpu::TextureView>")?;
+        let extent = view.as_ref().texture().size();
+        let size = Size {
+            width: DevicePixels(extent.width as i32),
+            height: DevicePixels(extent.height as i32),
+        };
+
+        let id = AtlasTextureId {
+            index: lock.next_external_index,
+            kind: AtlasTextureKind::External,
+        };
+        lock.next_external_index += 1;
+        lock.external_textures.insert(id, Arc::clone(view));
+
+        let tile = AtlasTile {
+            texture_id: id,
+            tile_id: TileId(0),
+            padding: 0,
+            bounds: Bounds {
+                origin: Point::default(),
+                size,
+            },
+        };
+        lock.tiles_by_key.insert(key.clone(), tile);
+        Ok(Some(tile))
+    }
+
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
@@ -134,6 +196,12 @@ impl PlatformAtlas for WgpuAtlas {
             return;
         };
         let id = tile.texture_id;
+
+        // External textures aren't atlas sheets: just drop the view reference.
+        if id.kind == AtlasTextureKind::External {
+            lock.external_textures.remove(&id);
+            return;
+        }
 
         let Some(texture_slot) = lock.storage[id.kind].textures.get_mut(id.index as usize) else {
             return;
@@ -196,6 +264,8 @@ impl WgpuAtlasState {
         let format = match kind {
             AtlasTextureKind::Monochrome => wgpu::TextureFormat::R8Unorm,
             AtlasTextureKind::Subpixel | AtlasTextureKind::Polychrome => self.color_texture_format,
+            // External textures are never pushed into atlas sheets.
+            AtlasTextureKind::External => unreachable!("external textures bypass the atlas"),
         };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -306,6 +376,8 @@ impl ops::Index<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            // External textures live in `external_textures`, not a sheet.
+            AtlasTextureKind::External => unreachable!("external textures bypass the atlas"),
         }
     }
 }
@@ -316,6 +388,8 @@ impl ops::IndexMut<AtlasTextureKind> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            // External textures live in `external_textures`, not a sheet.
+            AtlasTextureKind::External => unreachable!("external textures bypass the atlas"),
         }
     }
 }
@@ -336,6 +410,8 @@ impl ops::Index<AtlasTextureId> for WgpuAtlasStorage {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Subpixel => &self.subpixel_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            // External textures live in `external_textures`, not a sheet.
+            AtlasTextureKind::External => unreachable!("external textures bypass the atlas"),
         };
         textures[id.index as usize]
             .as_ref()

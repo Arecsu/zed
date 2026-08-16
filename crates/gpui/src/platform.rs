@@ -1311,6 +1311,19 @@ pub trait PlatformAtlas {
         key: &AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
+    /// Insert an externally-owned GPU texture as a drawable tile, without any
+    /// CPU round-trip. `image` is the opaque handle from [`GpuImage::as_any`];
+    /// the platform renderer downcasts it to its native texture type (e.g. a
+    /// `wgpu::TextureView`) and samples it directly on draw.
+    fn get_or_insert_gpu_image(
+        &self,
+        key: &AtlasKey,
+        image: &dyn std::any::Any,
+    ) -> Result<Option<AtlasTile>> {
+        // Default: no platform atlas supports zero-copy images; the caller
+        // falls back to the CPU path.
+        Ok(None)
+    }
     fn remove(&self, key: &AtlasKey);
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1394,6 +1407,10 @@ pub enum AtlasTextureKind {
     Monochrome = 0,
     Polychrome = 1,
     Subpixel = 2,
+    /// A single, externally-owned GPU texture drawn directly (zero-copy).
+    /// Never stored in an atlas sheet: the platform renderer keeps the native
+    /// texture view by [`AtlasTextureId`] and samples it in place.
+    External = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

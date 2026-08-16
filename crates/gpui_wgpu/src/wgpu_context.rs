@@ -17,6 +17,28 @@ pub struct WgpuContext {
     device_lost: Arc<AtomicBool>,
 }
 
+/// Process-wide handles to the windowing GPU, populated once a window's
+/// renderer exists. Lets compute/display work in the same process share the
+/// UI's device and queue so GPU textures can be drawn without a CPU round-trip.
+#[derive(Clone)]
+pub struct GpuHandles {
+    /// The wgpu device backing the UI surface.
+    pub device: Arc<wgpu::Device>,
+    /// The wgpu queue used to submit work to that device.
+    pub queue: Arc<wgpu::Queue>,
+}
+
+static GLOBAL_GPU: std::sync::OnceLock<GpuHandles> = std::sync::OnceLock::new();
+
+impl WgpuContext {
+    /// The windowing GPU's device/queue, once a window's renderer exists.
+    /// Returns `None` before the first window creates its renderer.
+    pub fn global_handles() -> Option<GpuHandles> {
+        GLOBAL_GPU.get().cloned()
+    }
+}
+
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WgpuBackend {
     BrowserWebGpu,
@@ -129,11 +151,20 @@ impl WgpuContext {
         );
 
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        // Publish the renderer's GPU so other code can create textures on it and
+        // draw them with no CPU round-trip. The first renderer wins; subsequent
+        // windows share the same device via the shared `GpuContext`.
+        let _ = GLOBAL_GPU.set(GpuHandles {
+            device: Arc::clone(&device),
+            queue: Arc::clone(&queue),
+        });
         Ok(Self {
             instance,
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device,
+            queue,
             backend,
             dual_source_blending,
             color_texture_format,
