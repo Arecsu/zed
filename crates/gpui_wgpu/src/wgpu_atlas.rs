@@ -329,6 +329,9 @@ impl WgpuAtlasState {
     }
 
     fn flush_uploads(&mut self) {
+        // Serialize the atlas upload (writes to the shared VkQueue) against the
+        // raw-Vulkan compute backend's submissions on the same queue.
+        let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
         for upload in self.pending_uploads.drain(..) {
             let Some(texture) = self.storage.get(upload.id) else {
                 continue;

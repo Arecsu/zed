@@ -1374,6 +1374,9 @@ impl WgpuRenderer {
         };
 
         {
+            // Serialize the queue writes/submits against the raw-Vulkan compute
+            // backend's submissions on the same VkQueue (per-queue external sync).
+            let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
             let resources = self.resources();
             resources.queue.write_buffer(
                 &resources.globals_buffer,
@@ -1394,6 +1397,7 @@ impl WgpuRenderer {
 
         if let Err(error) = self.record_frame(scene, &frame_view) {
             log::error!("{error:#}");
+            let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
             self.resources().queue.submit(std::iter::empty());
             return false;
         }
@@ -1533,6 +1537,7 @@ impl WgpuRenderer {
             }
         }
 
+        let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
         self.resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
@@ -1809,7 +1814,10 @@ impl WgpuRenderer {
         let resources = self.resources();
         if !data.is_empty() {
             match &resources.instance_data {
-                InstanceData::Storage(buffer) => resources.queue.write_buffer(buffer, offset, data),
+                InstanceData::Storage(buffer) => {
+                    let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
+                    resources.queue.write_buffer(buffer, offset, data)
+                }
                 InstanceData::Texture { .. } => {
                     Self::write_instance_texture(resources, offset, data)
                 }
@@ -1852,6 +1860,9 @@ impl WgpuRenderer {
         else {
             return;
         };
+        // Hold the queue lock across the texture uploads (each write_texture
+        // submits to the shared VkQueue and must not race the compute backend).
+        let _qg = crate::WgpuContext::queue_lock().lock().unwrap();
         let mut byte_offset = 0usize;
         let mut texel_offset = offset / INSTANCE_TEXTURE_TEXEL_SIZE;
         while byte_offset < data.len() {

@@ -26,7 +26,17 @@ pub struct GpuHandles {
     pub device: Arc<wgpu::Device>,
     /// The wgpu queue used to submit work to that device.
     pub queue: Arc<wgpu::Queue>,
+    /// Process-wide lock serializing all `vkQueueSubmit` calls on the UI's
+    /// `VkQueue`. The app's raw-Vulkan compute backend submits to the same queue
+    /// (zero-copy display), and Vulkan requires per-queue external sync — two
+    /// threads calling `vkQueueSubmit` on one queue at the same instant is a data
+    /// race. This lock is held only for the (microsecond) submit call, never for
+    /// GPU execution, so the UI and compute still run concurrently on the GPU.
+    pub queue_lock: &'static std::sync::Mutex<()>,
 }
+
+/// Serializes every `vkQueueSubmit` on the UI queue (see [`GpuHandles::queue_lock`]).
+static GLOBAL_QUEUE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static GLOBAL_GPU: std::sync::OnceLock<GpuHandles> = std::sync::OnceLock::new();
 
@@ -35,6 +45,13 @@ impl WgpuContext {
     /// Returns `None` before the first window creates its renderer.
     pub fn global_handles() -> Option<GpuHandles> {
         GLOBAL_GPU.get().cloned()
+    }
+
+    /// The process-wide lock guarding `vkQueueSubmit` on the shared UI queue.
+    /// Hold it across a submit call (and release immediately) so it can't race
+    /// the raw-Vulkan compute backend's submissions on the same `VkQueue`.
+    pub fn queue_lock() -> &'static std::sync::Mutex<()> {
+        &GLOBAL_QUEUE_LOCK
     }
 }
 
@@ -159,6 +176,7 @@ impl WgpuContext {
         let _ = GLOBAL_GPU.set(GpuHandles {
             device: Arc::clone(&device),
             queue: Arc::clone(&queue),
+            queue_lock: WgpuContext::queue_lock(),
         });
         Ok(Self {
             instance,

@@ -151,6 +151,12 @@ impl RenderImage {
 
     /// Get the number of frames for this image.
     pub fn frame_count(&self) -> usize {
+        // A zero-copy (GPU-resident) image has no CPU `data` frames — treat it as
+        // a single frame so img() doesn't skip painting it (img() bails when
+        // frame_count() == 0).
+        if self.gpu.is_some() {
+            return 1;
+        }
         self.data.len()
     }
 }
