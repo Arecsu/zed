@@ -3,6 +3,9 @@
 
 pub use gpui::Platform;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub use gpui_linux::{VulkanRenderer, VulkanRendererFactory, set_vulkan_renderer_factory};
+
 use std::rc::Rc;
 
 /// Returns a background executor for the current platform.

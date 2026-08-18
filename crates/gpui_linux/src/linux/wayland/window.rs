@@ -10,6 +10,7 @@ use collections::{FxHashMap, HashMap};
 use futures::channel::oneshot::Receiver;
 
 use raw_window_handle as rwh;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use wayland_backend::client::ObjectId;
 use wayland_client::WEnum;
 use wayland_client::{
@@ -31,6 +32,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
+use crate::{VulkanRenderer as ZoeVulkanRenderer, vulkan_renderer_factory};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
@@ -84,6 +86,100 @@ impl rwh::HasDisplayHandle for RawWindow {
     }
 }
 
+/// GPUI's Wayland platform still owns all window lifecycle and scene timing;
+/// this enum only swaps the GPU submission implementation. The Vulkan branch
+/// is opt-in until its clear/surface gate is validated, so normal GPUI users
+/// retain the existing renderer.
+enum WindowRenderer {
+    Wgpu(WgpuRenderer),
+    Vulkan(Box<dyn ZoeVulkanRenderer>),
+}
+
+impl WindowRenderer {
+    fn max_texture_size(&self) -> u32 {
+        match self {
+            Self::Wgpu(renderer) => renderer.max_texture_size(),
+            Self::Vulkan(renderer) => renderer.max_texture_size(),
+        }
+    }
+
+    fn gpu_specs(&self) -> GpuSpecs {
+        match self {
+            Self::Wgpu(renderer) => renderer.gpu_specs(),
+            Self::Vulkan(renderer) => renderer.gpu_specs(),
+        }
+    }
+
+    fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        match self {
+            Self::Wgpu(renderer) => renderer.update_drawable_size(size),
+            Self::Vulkan(renderer) => renderer.update_drawable_size(size),
+        }
+    }
+
+    fn set_subpixel_layout(&mut self, is_bgr: bool) {
+        match self {
+            Self::Wgpu(renderer) => renderer.set_subpixel_layout(is_bgr),
+            Self::Vulkan(renderer) => renderer.set_subpixel_layout(is_bgr),
+        }
+    }
+
+    fn update_transparency(&mut self, transparent: bool) {
+        match self {
+            Self::Wgpu(renderer) => renderer.update_transparency(transparent),
+            Self::Vulkan(renderer) => renderer.update_transparency(transparent),
+        }
+    }
+
+    fn device_lost(&self) -> bool {
+        match self {
+            Self::Wgpu(renderer) => renderer.device_lost(),
+            Self::Vulkan(renderer) => renderer.device_lost(),
+        }
+    }
+
+    fn recover(&mut self, raw_window: &RawWindow) -> anyhow::Result<()> {
+        match self {
+            Self::Wgpu(renderer) => renderer.recover(raw_window),
+            Self::Vulkan(renderer) => {
+                let _ = raw_window;
+                renderer.recover()
+            }
+        }
+    }
+
+    fn draw(&mut self, scene: &Scene) -> bool {
+        match self {
+            Self::Wgpu(renderer) => renderer.draw(scene),
+            Self::Vulkan(renderer) => {
+                let _ = scene;
+                renderer.draw()
+            }
+        }
+    }
+
+    fn needs_redraw(&mut self) -> bool {
+        match self {
+            Self::Wgpu(renderer) => renderer.needs_redraw(),
+            Self::Vulkan(renderer) => renderer.needs_redraw(),
+        }
+    }
+
+    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        match self {
+            Self::Wgpu(renderer) => renderer.sprite_atlas().clone(),
+            Self::Vulkan(renderer) => renderer.sprite_atlas(),
+        }
+    }
+
+    fn destroy(&mut self) {
+        match self {
+            Self::Wgpu(renderer) => renderer.destroy(),
+            Self::Vulkan(renderer) => renderer.destroy(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct InProgressConfigure {
     size: Option<Size<Pixels>>,
@@ -108,7 +204,7 @@ pub struct WaylandWindowState {
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: WgpuRenderer,
+    renderer: WindowRenderer,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -552,16 +648,29 @@ impl WaylandWindowState {
         options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
     ) -> anyhow::Result<Self> {
-        let renderer = {
-            let raw_window = RawWindow {
-                window: surface.id().as_ptr().cast::<c_void>(),
-                display: surface
-                    .backend()
-                    .upgrade()
-                    .unwrap()
-                    .display_ptr()
-                    .cast::<c_void>(),
+        let raw_window = RawWindow {
+            window: surface.id().as_ptr().cast::<c_void>(),
+            display: surface
+                .backend()
+                .upgrade()
+                .unwrap()
+                .display_ptr()
+                .cast::<c_void>(),
+        };
+        let renderer = if std::env::var_os("ZOE_GPUI_VULKAN").is_some() {
+            let factory = vulkan_renderer_factory().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ZOE_GPUI_VULKAN is set but no private Vulkan renderer factory was installed"
+                )
+            })?;
+            let display = raw_window.display_handle()?.as_raw();
+            let window = raw_window.window_handle()?.as_raw();
+            let size = Size {
+                width: DevicePixels(f32::from(options.bounds.size.width) as i32),
+                height: DevicePixels(f32::from(options.bounds.size.height) as i32),
             };
+            WindowRenderer::Vulkan(factory.create(display, window, size, true)?)
+        } else {
             let config = WgpuSurfaceConfig {
                 size: Size {
                     width: DevicePixels(f32::from(options.bounds.size.width) as i32),
@@ -571,7 +680,12 @@ impl WaylandWindowState {
                 // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
             };
-            WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
+            WindowRenderer::Wgpu(WgpuRenderer::new(
+                gpu_context,
+                &raw_window,
+                config,
+                compositor_gpu,
+            )?)
         };
 
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
