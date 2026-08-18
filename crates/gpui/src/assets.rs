@@ -3,11 +3,17 @@ use smallvec::SmallVec;
 
 use image::{Delay, Frame};
 use std::{
+    any::Any,
     borrow::Cow,
     fmt,
     hash::Hash,
-    sync::atomic::{AtomicUsize, Ordering::SeqCst},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    },
 };
+
+static NEXT_IMAGE_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// A source of assets for this app to use.
 pub trait AssetSource: 'static + Send + Sync {
@@ -39,13 +45,43 @@ pub struct RenderImageParams {
     pub frame_index: usize,
 }
 
-/// A cached and processed image, in BGRA format
+/// An immutable native image supplied by a platform renderer.
+///
+/// The handle is intentionally opaque to GPUI. A platform atlas may downcast
+/// it to its own image type, while the scene and element layers retain only
+/// the stable image identity and dimensions. Native images have no CPU frame
+/// bytes, so they must never enter the ordinary byte-upload callback.
+#[derive(Clone)]
+pub struct ExternalImage {
+    size: Size<DevicePixels>,
+    handle: Arc<dyn Any + Send + Sync>,
+}
+
+impl ExternalImage {
+    /// Create an opaque platform-owned image descriptor.
+    pub fn new(size: Size<DevicePixels>, handle: Arc<dyn Any + Send + Sync>) -> Self {
+        Self { size, handle }
+    }
+
+    /// Return the physical dimensions of the native image.
+    pub fn size(&self) -> Size<DevicePixels> {
+        self.size
+    }
+
+    /// Return the opaque native handle for the active platform atlas.
+    pub fn handle(&self) -> &(dyn Any + Send + Sync) {
+        self.handle.as_ref()
+    }
+}
+
+/// A cached and processed image, in BGRA format, or an immutable native image.
 pub struct RenderImage {
     /// The ID associated with this image
     pub id: ImageId,
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
     data: SmallVec<[Frame; 1]>,
+    external: Option<ExternalImage>,
 }
 
 impl PartialEq for RenderImage {
@@ -59,13 +95,27 @@ impl Eq for RenderImage {}
 impl RenderImage {
     /// Create a new image from the given data.
     pub fn new(data: impl Into<SmallVec<[Frame; 1]>>) -> Self {
-        static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
         Self {
-            id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
+            id: ImageId(NEXT_IMAGE_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
             data: data.into(),
+            external: None,
         }
+    }
+
+    /// Create an image whose pixels are owned by a platform renderer.
+    pub fn new_external(size: Size<DevicePixels>, handle: Arc<dyn Any + Send + Sync>) -> Self {
+        Self {
+            id: ImageId(NEXT_IMAGE_ID.fetch_add(1, SeqCst)),
+            scale_factor: 1.0,
+            data: SmallVec::new(),
+            external: Some(ExternalImage::new(size, handle)),
+        }
+    }
+
+    /// Return the native image descriptor, if this image is platform-owned.
+    pub fn external(&self) -> Option<&ExternalImage> {
+        self.external.as_ref()
     }
 
     /// Convert this image into a byte slice.
@@ -77,6 +127,11 @@ impl RenderImage {
 
     /// Get the size of this image, in pixels.
     pub fn size(&self, frame_index: usize) -> Size<DevicePixels> {
+        if let Some(external) = &self.external {
+            return (frame_index == 0)
+                .then_some(external.size)
+                .unwrap_or_default();
+        }
         self.data
             .get(frame_index)
             .map(|frame| {
@@ -102,7 +157,11 @@ impl RenderImage {
 
     /// Get the number of frames for this image.
     pub fn frame_count(&self) -> usize {
-        self.data.len()
+        if self.external.is_some() {
+            1
+        } else {
+            self.data.len()
+        }
     }
 }
 
@@ -129,5 +188,14 @@ mod tests {
         assert_eq!(image.render_size(0), Size::default());
         assert_eq!(image.delay(0), Delay::from_numer_denom_ms(100, 1));
         let _ = format!("{image:?}");
+    }
+
+    #[test]
+    fn external_render_image_has_one_frame_without_cpu_bytes() {
+        let image = RenderImage::new_external(size(8u32.into(), 6u32.into()), Arc::new(()));
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.size(0), size(8u32.into(), 6u32.into()));
+        assert_eq!(image.as_bytes(0), None);
+        assert!(image.external().is_some());
     }
 }

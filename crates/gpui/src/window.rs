@@ -2798,6 +2798,7 @@ impl Window {
     /// the contents of the new [`Scene`], use [`Self::present`].
     #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        let scene_build_start = Instant::now();
         // Drain every draw in profiler builds so a stale first-invalidation
         // timestamp can't leak across enable/disable of runtime tracing.
         #[cfg(feature = "profiler")]
@@ -2856,6 +2857,8 @@ impl Window {
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
+        self.platform_window
+            .record_scene_build_us(scene_build_start.elapsed().as_micros() as u64);
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -4409,19 +4412,24 @@ impl Window {
             image_id: data.id,
             frame_index,
         };
-
-        let tile = self
-            .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
-                Ok(Some((
-                    data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
-                )))
-            })?
-            .expect("Callback above only returns Some");
+        let key = params.into();
+        let tile = if let Some(external) = data.external() {
+            self.sprite_atlas
+                .get_or_insert_external(&key, external)?
+                .ok_or_else(|| anyhow::anyhow!("platform atlas does not support external images"))?
+        } else {
+            self.sprite_atlas
+                .get_or_insert_with(&key, &mut || {
+                    Ok(Some((
+                        data.size(frame_index),
+                        Cow::Borrowed(
+                            data.as_bytes(frame_index)
+                                .expect("It's the caller's job to pass a valid frame index"),
+                        ),
+                    )))
+                })?
+                .expect("Callback above only returns Some")
+        };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
 

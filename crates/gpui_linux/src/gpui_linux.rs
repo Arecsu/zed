@@ -14,6 +14,9 @@ pub trait VulkanRenderer: 'static {
     fn max_texture_size(&self) -> u32;
     fn gpu_specs(&self) -> GpuSpecs;
     fn draw(&mut self, scene: &Scene) -> bool;
+    /// Receives the measured GPUI scene-build phase before native recording.
+    /// The default keeps non-Zoe renderers source-compatible.
+    fn record_scene_build_us(&mut self, _elapsed_us: u64) {}
     fn needs_redraw(&mut self) -> bool;
     fn device_lost(&self) -> bool;
     fn recover(&mut self) -> anyhow::Result<()>;

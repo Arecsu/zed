@@ -151,7 +151,13 @@ impl WindowRenderer {
     fn draw(&mut self, scene: &Scene) -> bool {
         match self {
             Self::Wgpu(renderer) => renderer.draw(scene),
-            Self::Vulkan(renderer) => renderer.draw(scene)
+            Self::Vulkan(renderer) => renderer.draw(scene),
+        }
+    }
+
+    fn record_scene_build_us(&mut self, elapsed_us: u64) {
+        if let Self::Vulkan(renderer) = self {
+            renderer.record_scene_build_us(elapsed_us);
         }
     }
 
@@ -1845,6 +1851,10 @@ impl PlatformWindow for WaylandWindow {
         if state.renderer.needs_redraw() {
             state.force_render_after_recovery = true;
         }
+    }
+
+    fn record_scene_build_us(&self, elapsed_us: u64) {
+        self.borrow_mut().renderer.record_scene_build_us(elapsed_us);
     }
 
     fn completed_frame(&self) {
