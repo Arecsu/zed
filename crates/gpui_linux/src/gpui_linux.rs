@@ -1,7 +1,7 @@
 #![cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux;
 
-use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Size};
+use gpui::{DevicePixels, GpuSpecs, PlatformAtlas, Scene, Size};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::sync::{Arc, OnceLock};
 
@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 pub trait VulkanRenderer: 'static {
     fn max_texture_size(&self) -> u32;
     fn gpu_specs(&self) -> GpuSpecs;
-    fn draw(&mut self) -> bool;
+    fn draw(&mut self, scene: &Scene) -> bool;
     fn needs_redraw(&mut self) -> bool;
     fn device_lost(&self) -> bool;
     fn recover(&mut self) -> anyhow::Result<()>;

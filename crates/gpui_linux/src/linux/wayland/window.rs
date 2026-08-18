@@ -151,10 +151,7 @@ impl WindowRenderer {
     fn draw(&mut self, scene: &Scene) -> bool {
         match self {
             Self::Wgpu(renderer) => renderer.draw(scene),
-            Self::Vulkan(renderer) => {
-                let _ = scene;
-                renderer.draw()
-            }
+            Self::Vulkan(renderer) => renderer.draw(scene)
         }
     }
 
