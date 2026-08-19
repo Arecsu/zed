@@ -1329,6 +1329,11 @@ pub trait PlatformAtlas {
 
     fn remove(&self, key: &AtlasKey);
 
+    /// Discard native external-image registrations after device loss. The
+    /// default is a no-op for ordinary CPU atlases; native atlases must not
+    /// wait on fences or call the lost device from this callback.
+    fn device_lost(&self) {}
+
     #[cfg(any(test, feature = "test-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false

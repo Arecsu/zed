@@ -45,32 +45,89 @@ pub struct RenderImageParams {
     pub frame_index: usize,
 }
 
+/// Pixel format advertised by an external image. GPUI does not reinterpret
+/// native pixels; the active platform atlas must explicitly support the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalImageFormat {
+    /// 8-bit BGRA channels with normalized integer components.
+    Bgra8Unorm,
+}
+
+/// Display encoding advertised by an external image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalImageColorSpace {
+    /// sRGB-encoded display values.
+    Srgb,
+}
+
+/// Backend-neutral metadata required before a native image enters a platform
+/// atlas. Generation and release semantics remain in the opaque handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalImageDescriptor {
+    /// Physical image dimensions.
+    pub size: Size<DevicePixels>,
+    /// Native channel format.
+    pub format: ExternalImageFormat,
+    /// Display encoding of the pixels.
+    pub color_space: ExternalImageColorSpace,
+}
+
 /// An immutable native image supplied by a platform renderer.
 ///
 /// The handle is intentionally opaque to GPUI. A platform atlas may downcast
 /// it to its own image type, while the scene and element layers retain only
-/// the stable image identity and dimensions. Native images have no CPU frame
+/// the stable image identity and descriptor. Native images have no CPU frame
 /// bytes, so they must never enter the ordinary byte-upload callback.
 #[derive(Clone)]
 pub struct ExternalImage {
-    size: Size<DevicePixels>,
+    descriptor: ExternalImageDescriptor,
     handle: Arc<dyn Any + Send + Sync>,
 }
 
 impl ExternalImage {
-    /// Create an opaque platform-owned image descriptor.
+    /// Compatibility constructor for the initial BGRA8/sRGB external-image
+    /// contract.
     pub fn new(size: Size<DevicePixels>, handle: Arc<dyn Any + Send + Sync>) -> Self {
-        Self { size, handle }
+        Self::new_with_descriptor(
+            ExternalImageDescriptor {
+                size,
+                format: ExternalImageFormat::Bgra8Unorm,
+                color_space: ExternalImageColorSpace::Srgb,
+            },
+            handle,
+        )
+    }
+
+    /// Create an opaque platform-owned image with explicit native metadata.
+    pub fn new_with_descriptor(
+        descriptor: ExternalImageDescriptor,
+        handle: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        Self { descriptor, handle }
+    }
+
+    /// Return the immutable native image metadata.
+    pub fn descriptor(&self) -> ExternalImageDescriptor {
+        self.descriptor
     }
 
     /// Return the physical dimensions of the native image.
     pub fn size(&self) -> Size<DevicePixels> {
-        self.size
+        self.descriptor.size
     }
 
     /// Return the opaque native handle for the active platform atlas.
     pub fn handle(&self) -> &(dyn Any + Send + Sync) {
         self.handle.as_ref()
+    }
+
+    /// Clone a typed handle without exposing the erased Arc nesting convention
+    /// to every platform atlas implementation.
+    pub fn downcast_handle<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync,
+    {
+        Arc::clone(&self.handle).downcast::<T>().ok()
     }
 }
 
@@ -129,7 +186,7 @@ impl RenderImage {
     pub fn size(&self, frame_index: usize) -> Size<DevicePixels> {
         if let Some(external) = &self.external {
             return (frame_index == 0)
-                .then_some(external.size)
+                .then_some(external.size())
                 .unwrap_or_default();
         }
         self.data
@@ -197,5 +254,20 @@ mod tests {
         assert_eq!(image.size(0), size(8u32.into(), 6u32.into()));
         assert_eq!(image.as_bytes(0), None);
         assert!(image.external().is_some());
+    }
+
+    #[test]
+    fn external_handle_round_trips_as_one_typed_arc() {
+        let handle = Arc::new(String::from("native"));
+        let image = RenderImage::new_external(size(1u32.into(), 1u32.into()), handle.clone());
+        let external = image.external().expect("external image");
+        assert_eq!(
+            external.downcast_handle::<String>().as_deref(),
+            Some(&String::from("native"))
+        );
+        assert_eq!(Arc::strong_count(&handle), 2);
+        assert!(external.downcast_handle::<u32>().is_none());
+        assert_eq!(external.descriptor().format, ExternalImageFormat::Bgra8Unorm);
+        assert_eq!(external.descriptor().color_space, ExternalImageColorSpace::Srgb);
     }
 }

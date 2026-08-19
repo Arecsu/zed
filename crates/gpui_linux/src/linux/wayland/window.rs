@@ -1825,6 +1825,10 @@ impl PlatformWindow for WaylandWindow {
         let mut state = self.borrow_mut();
 
         if state.renderer.device_lost() {
+            // A lost device invalidates every native external-image
+            // registration before recovery. The atlas callback is deliberately
+            // non-blocking; the renderer owns backend-state invalidation.
+            state.renderer.sprite_atlas().device_lost();
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
                 display: state
