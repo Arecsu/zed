@@ -14,6 +14,10 @@ pub trait VulkanRenderer: 'static {
     fn max_texture_size(&self) -> u32;
     fn gpu_specs(&self) -> GpuSpecs;
     fn draw(&mut self, scene: &Scene) -> bool;
+    /// Called by GPUI after the platform frame boundary has been completed.
+    /// Native presenters use this explicit callback to hand consumer-use
+    /// retirement back to their owning scheduler.
+    fn completed_frame(&mut self) {}
     /// Receives the measured GPUI scene-build phase before native recording.
     /// The default keeps non-Zoe renderers source-compatible.
     fn record_scene_build_us(&mut self, _elapsed_us: u64) {}

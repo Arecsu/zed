@@ -161,6 +161,12 @@ impl WindowRenderer {
         }
     }
 
+    fn completed_frame(&mut self) {
+        if let Self::Vulkan(renderer) = self {
+            renderer.completed_frame();
+        }
+    }
+
     fn needs_redraw(&mut self) -> bool {
         match self {
             Self::Wgpu(renderer) => renderer.needs_redraw(),
@@ -1863,6 +1869,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn completed_frame(&self) {
         let mut state = self.borrow_mut();
+        // Notify the Zoe renderer before the Wayland bookkeeping is finalized.
+        // This is an explicit GPUI frame boundary, not a polling heuristic;
+        // the renderer may defer native resource retirement until this point.
+        state.renderer.completed_frame();
 
         // Work around a bug in old versions of wlroots where committing without a buffer attached
         // can cause invalid synchronization that leads to graphical corruption.
