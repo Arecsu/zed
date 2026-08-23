@@ -1517,6 +1517,16 @@ impl Window {
             let input_rate_tracker = input_rate_tracker.clone();
             let mut deferred_force_render = false;
             move |request_frame_options| {
+                if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                    eprintln!(
+                        "[gpui-present] request_frame force={} require={} active={} dirty={} callbacks={}",
+                        request_frame_options.force_render,
+                        request_frame_options.require_presentation,
+                        active.get(),
+                        invalidator.is_dirty(),
+                        next_frame_callbacks.borrow().len(),
+                    );
+                }
                 // This must be checked before anything else: if this request
                 // arrived re-entrantly while a draw is on this thread's stack
                 // (e.g. via a nested message pump in the Windows window
@@ -1604,6 +1614,16 @@ impl Window {
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || input_rate_tracker.borrow_mut().is_high_rate();
+
+                if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                    eprintln!(
+                        "[gpui-present] decision force={} dirty={} needs_present={} callbacks={}",
+                        force_render,
+                        invalidator.is_dirty(),
+                        needs_present,
+                        next_frame_callbacks.borrow().len(),
+                    );
+                }
 
                 if invalidator.is_dirty() || force_render {
                     measure("frame duration", || {
