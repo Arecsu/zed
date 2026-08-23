@@ -30,7 +30,11 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
-use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
+use crate::linux::wayland::{
+    display::WaylandDisplay,
+    serial::SerialKind,
+    wayland_bench_elapsed_ms,
+};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use crate::{VulkanRenderer as ZoeVulkanRenderer, vulkan_renderer_factory};
 use gpui::{
@@ -963,11 +967,14 @@ impl WaylandWindowStatePtr {
         state.children.values().any(|&blocking| blocking)
     }
 
-    pub fn frame(&self, compositor_time_ms: u32) {
+    pub fn frame(&self, compositor_time_ms: u32, callback_received_ms: Option<f64>) {
         let mut state = self.state.borrow_mut();
-        if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+        if let Some(local_ms) = wayland_bench_elapsed_ms() {
             eprintln!(
-                "[wayland-present] frame_callback_done compositor_ms={compositor_time_ms}"
+                "[wayland-present] frame_callback_done local_ms={local_ms:.3} compositor_ms={compositor_time_ms} callback_received_local_ms={}",
+                callback_received_ms
+                    .map(|value| format!("{value:.3}"))
+                    .unwrap_or_else(|| "none".to_string())
             );
         }
         state.surface.frame(&state.globals.qh, state.surface.id());
@@ -978,6 +985,9 @@ impl WaylandWindowStatePtr {
             && let Some(presentation_time) = state.globals.presentation_time.as_ref()
         {
             presentation_time.feedback(&state.surface, &state.globals.qh, state.surface.id());
+        }
+        if let Some(local_ms) = wayland_bench_elapsed_ms() {
+            eprintln!("[wayland-present] frame_request_armed local_ms={local_ms:.3}");
         }
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
@@ -1021,8 +1031,9 @@ impl WaylandWindowStatePtr {
         if let xdg_surface::Event::Configure { serial } = event {
             if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
                 let state = self.state.borrow();
+                let local_ms = wayland_bench_elapsed_ms().unwrap_or_default();
                 eprintln!(
-                    "[wayland-present] xdg_configure serial={} first_configured={} active={} size={}x{}",
+                    "[wayland-present] xdg_configure local_ms={local_ms:.3} serial={} first_configured={} active={} size={}x{}",
                     serial,
                     state.acknowledged_first_configure,
                     state.active,
@@ -1098,7 +1109,7 @@ impl WaylandWindowStatePtr {
             if request_frame_callback {
                 state.acknowledged_first_configure = true;
                 drop(state);
-                self.frame(0);
+                self.frame(0, None);
             }
         }
     }
@@ -1127,13 +1138,15 @@ impl WaylandWindowStatePtr {
                 wayland_backend::protocol::WEnum::Unknown(flags) => flags,
             };
             if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                let local_ms = wayland_bench_elapsed_ms().unwrap_or_default();
                 eprintln!(
-                    "[wayland-present] feedback_presented timestamp_ns={} refresh_ns={} sequence={} flags={}",
+                    "[wayland-present] feedback_presented local_ms={local_ms:.3} timestamp_ns={} refresh_ns={} sequence={} flags={}",
                     timestamp_ns, refresh, sequence, flags
                 );
             }
         } else if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
-            eprintln!("[wayland-present] feedback_discarded");
+            let local_ms = wayland_bench_elapsed_ms().unwrap_or_default();
+            eprintln!("[wayland-present] feedback_discarded local_ms={local_ms:.3}");
         }
     }
 
@@ -1905,8 +1918,9 @@ impl PlatformWindow for WaylandWindow {
         if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
             state.bench_draw_count = state.bench_draw_count.saturating_add(1);
             if state.bench_draw_count == 1 || state.bench_draw_count.is_multiple_of(60) {
+                let local_ms = wayland_bench_elapsed_ms().unwrap_or_default();
                 eprintln!(
-                    "[wayland-present] gpui_draw_entry count={}",
+                    "[wayland-present] gpui_draw_entry local_ms={local_ms:.3} count={}",
                     state.bench_draw_count
                 );
             }

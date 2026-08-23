@@ -4,6 +4,7 @@ use std::{
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -112,6 +113,18 @@ const MIN_KEYCODE: u32 = 8;
 
 const UNKNOWN_KEYBOARD_LAYOUT_NAME: SharedString = SharedString::new_static("unknown");
 const XDG_ACTIVATION_TOKEN_ENV_VAR: &str = "XDG_ACTIVATION_TOKEN";
+
+static WAYLAND_BENCH_START: OnceLock<Instant> = OnceLock::new();
+
+pub(crate) fn wayland_bench_elapsed_ms() -> Option<f64> {
+    std::env::var_os("ZOE_GPUI_BENCH").map(|_| {
+        WAYLAND_BENCH_START
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1000.0
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ImeCursorRectangle {
@@ -1424,7 +1437,13 @@ impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
         drop(state);
 
         if let wl_callback::Event::Done { callback_data } = event {
-            window.frame(callback_data);
+            let received_ms = wayland_bench_elapsed_ms();
+            if let Some(received_ms) = received_ms {
+                eprintln!(
+                    "[wayland-present] frame_callback_received local_ms={received_ms:.3} compositor_ms={callback_data}"
+                );
+            }
+            window.frame(callback_data, received_ms);
         }
     }
 }
