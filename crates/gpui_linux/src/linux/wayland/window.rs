@@ -229,6 +229,7 @@ pub struct WaylandWindowState {
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
     renderer_presented: bool,
+    bench_draw_count: u64,
     in_progress_configure: Option<InProgressConfigure>,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
@@ -745,6 +746,7 @@ impl WaylandWindowState {
             hovered: false,
             force_render_after_recovery: false,
             renderer_presented: false,
+            bench_draw_count: 0,
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
@@ -961,9 +963,22 @@ impl WaylandWindowStatePtr {
         state.children.values().any(|&blocking| blocking)
     }
 
-    pub fn frame(&self) {
+    pub fn frame(&self, compositor_time_ms: u32) {
         let mut state = self.state.borrow_mut();
+        if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+            eprintln!(
+                "[wayland-present] frame_callback_done compositor_ms={compositor_time_ms}"
+            );
+        }
         state.surface.frame(&state.globals.qh, state.surface.id());
+        // Queue presentation feedback before the renderer's Vulkan
+        // queue-present/Wayland commit. Feedback requests apply to the next
+        // committed buffer, so requesting it after draw would miss this frame.
+        if std::env::var_os("ZOE_GPUI_BENCH").is_some()
+            && let Some(presentation_time) = state.globals.presentation_time.as_ref()
+        {
+            presentation_time.feedback(&state.surface, &state.globals.qh, state.surface.id());
+        }
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
         state.force_render_after_recovery = false;
@@ -1004,6 +1019,17 @@ impl WaylandWindowStatePtr {
 
     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
         if let xdg_surface::Event::Configure { serial } = event {
+            if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                let state = self.state.borrow();
+                eprintln!(
+                    "[wayland-present] xdg_configure serial={} first_configured={} active={} size={}x{}",
+                    serial,
+                    state.acknowledged_first_configure,
+                    state.active,
+                    state.bounds.size.width,
+                    state.bounds.size.height,
+                );
+            }
             {
                 let mut state = self.state.borrow_mut();
                 if let Some(window_controls) = state.in_progress_window_controls.take() {
@@ -1072,8 +1098,42 @@ impl WaylandWindowStatePtr {
             if request_frame_callback {
                 state.acknowledged_first_configure = true;
                 drop(state);
-                self.frame();
+                self.frame(0);
             }
+        }
+    }
+
+    pub fn presentation_feedback(
+        &self,
+        event: wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::Event,
+    ) {
+        if let wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::Event::Presented {
+            tv_sec_hi,
+            tv_sec_lo,
+            tv_nsec,
+            refresh,
+            seq_hi,
+            seq_lo,
+            flags,
+        } = event
+        {
+            let timestamp_ns = (u64::from(tv_sec_hi) << 32)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(u64::from(tv_sec_lo).saturating_mul(1_000_000_000))
+                .saturating_add(u64::from(tv_nsec));
+            let sequence = (u64::from(seq_hi) << 32) | u64::from(seq_lo);
+            let flags = match flags {
+                wayland_backend::protocol::WEnum::Value(flags) => flags.bits(),
+                wayland_backend::protocol::WEnum::Unknown(flags) => flags,
+            };
+            if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                eprintln!(
+                    "[wayland-present] feedback_presented timestamp_ns={} refresh_ns={} sequence={} flags={}",
+                    timestamp_ns, refresh, sequence, flags
+                );
+            }
+        } else if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+            eprintln!("[wayland-present] feedback_discarded");
         }
     }
 
@@ -1164,6 +1224,16 @@ impl WaylandWindowStatePtr {
                     tiling = Tiling::tiled();
                 }
 
+                if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+                    eprintln!(
+                        "[wayland-present] toplevel_configure size={}x{} fullscreen={} maximized={} resizing={}",
+                        width,
+                        height,
+                        fullscreen,
+                        maximized,
+                        resizing,
+                    );
+                }
                 let mut state = self.state.borrow_mut();
                 state.in_progress_configure = Some(InProgressConfigure {
                     size,
@@ -1470,6 +1540,9 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn set_focused(&self, focus: bool) {
+        if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+            eprintln!("[wayland-present] focus active={focus}");
+        }
         self.state.borrow_mut().active = focus;
         let callback = self.callbacks.borrow_mut().active_status_change.take();
         if let Some(mut fun) = callback {
@@ -1829,6 +1902,15 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+        if std::env::var_os("ZOE_GPUI_BENCH").is_some() {
+            state.bench_draw_count = state.bench_draw_count.saturating_add(1);
+            if state.bench_draw_count == 1 || state.bench_draw_count.is_multiple_of(60) {
+                eprintln!(
+                    "[wayland-present] gpui_draw_entry count={}",
+                    state.bench_draw_count
+                );
+            }
+        }
 
         if state.renderer.device_lost() {
             // A lost device invalidates every native external-image

@@ -63,6 +63,7 @@ use wayland_protocols::xdg::shell::client::{
 use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
 use wayland_protocols::{
     wp::cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
+    wp::presentation_time::client::{wp_presentation, wp_presentation_feedback},
     xdg::dialog::v1::client::xdg_wm_dialog_v1::{self, XdgWmDialogV1},
 };
 use wayland_protocols::{
@@ -220,6 +221,10 @@ pub struct Globals {
     pub gesture_manager: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     pub dialog: Option<xdg_wm_dialog_v1::XdgWmDialogV1>,
     pub system_bell: Option<xdg_system_bell_v1::XdgSystemBellV1>,
+    /// Optional compositor presentation feedback. GNOME/Mutter normally
+    /// advertises this stable protocol; absence leaves frame-callback timing
+    /// available but makes compositor-observed timestamps unavailable.
+    pub presentation_time: Option<wp_presentation::WpPresentation>,
     pub executor: ForegroundExecutor,
 }
 
@@ -262,6 +267,7 @@ impl Globals {
             gesture_manager: globals.bind(&qh, 1..=3, ()).ok(),
             dialog: globals.bind(&qh, dialog_v..=dialog_v, ()).ok(),
             system_bell: globals.bind(&qh, 1..=1, ()).ok(),
+            presentation_time: globals.bind(&qh, 1..=1, ()).ok(),
             executor,
             qh,
         }
@@ -1378,6 +1384,28 @@ delegate_noop!(WaylandClientStatePtr: ignore zwp_text_input_manager_v3::ZwpTextI
 delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
 delegate_noop!(WaylandClientStatePtr: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandClientStatePtr: ignore wp_viewport::WpViewport);
+delegate_noop!(WaylandClientStatePtr: ignore wp_presentation::WpPresentation);
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ObjectId>
+    for WaylandClientStatePtr
+{
+    fn event(
+        state: &mut WaylandClientStatePtr,
+        _: &wp_presentation_feedback::WpPresentationFeedback,
+        event: wp_presentation_feedback::Event,
+        surface_id: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = state.get_client();
+        let mut state = client.borrow_mut();
+        let Some(window) = get_window(&mut state, surface_id) else {
+            return;
+        };
+        drop(state);
+        window.presentation_feedback(event);
+    }
+}
 
 impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
     fn event(
@@ -1395,8 +1423,8 @@ impl Dispatch<WlCallback, ObjectId> for WaylandClientStatePtr {
         };
         drop(state);
 
-        if let wl_callback::Event::Done { .. } = event {
-            window.frame();
+        if let wl_callback::Event::Done { callback_data } = event {
+            window.frame(callback_data);
         }
     }
 }
